@@ -1,4 +1,4 @@
-window.biWebSock = (function() {
+window.biWebSock = (function () {
     var dataStruct = [{
         name: "Header Length",
         key: "headerLen",
@@ -27,13 +27,66 @@ window.biWebSock = (function() {
 
     var protocol = location.origin.match(/^(.+):\/\//)[1]
 
-    var wsUrl = 'ws://broadcastlv.chat.bilibili.com:2244/sub'
-
-    if (protocol === 'https') {
-        wsUrl = 'wss://broadcastlv.chat.bilibili.com:2245/sub'
+    var Ajax = {
+        get: function (url, fn) {
+            // XMLHttpRequest对象用于在后台与服务器交换数据   
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', url, true);
+            xhr.onreadystatechange = function () {
+                // readyState == 4说明请求已完成
+                if (xhr.readyState == 4 && xhr.status == 200 || xhr.status == 304) {
+                    // 从服务器获得数据 
+                    fn.call(this, xhr.responseText);
+                }
+            };
+            xhr.send();
+        },
+        // datat应为'a=a1&b=b1'这种字符串格式，在jq里如果data为对象会自动将对象转成这种字符串格式
+        post: function (url, data, fn) {
+            var xhr = new XMLHttpRequest();
+            xhr.open("POST", url, true);
+            // 添加http头，发送信息至服务器时内容编码类型
+            xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+            xhr.onreadystatechange = function () {
+                if (xhr.readyState == 4 && (xhr.status == 200 || xhr.status == 304)) {
+                    fn.call(this, xhr.responseText);
+                }
+            };
+            xhr.send(data);
+        }
     }
 
-    wsUrl = 'wss://api.energys.cn/sub' // 自己的服务器转发
+    function loadXML(xmlString) {
+        var xmlDoc = null;
+        //判断浏览器的类型
+        //支持IE浏览器
+        if (!window.DOMParser && window.ActiveXObject) { //window.DOMParser 判断是否是非ie浏览器
+            var xmlDomVersions = ['MSXML.2.DOMDocument.6.0', 'MSXML.2.DOMDocument.3.0', 'Microsoft.XMLDOM'];
+            for (var i = 0; i < xmlDomVersions.length; i++) {
+                try {
+                    xmlDoc = new ActiveXObject(xmlDomVersions[i]);
+                    xmlDoc.async = false;
+                    xmlDoc.loadXML(xmlString); //loadXML方法载入xml字符串
+                    break;
+                } catch (e) {}
+            }
+        }
+        //支持Mozilla浏览器
+        else if (window.DOMParser && document.implementation && document.implementation.createDocument) {
+            try {
+                /* DOMParser 对象解析 XML 文本并返回一个 XML Document 对象。
+                 * 要使用 DOMParser，使用不带参数的构造函数来实例化它，然后调用其 parseFromString() 方法
+                 * parseFromString(text, contentType) 参数text:要解析的 XML 标记 参数contentType文本的内容类型
+                 * 可能是 "text/xml" 、"application/xml" 或 "application/xhtml+xml" 中的一个。注意，不支持 "text/html"。
+                 */
+                domParser = new DOMParser();
+                xmlDoc = domParser.parseFromString(xmlString, 'text/xml');
+            } catch (e) {}
+        } else {
+            return null;
+        }
+        return xmlDoc;
+    }
 
     function str2bytes(str) {
         var bytes = new Array()
@@ -128,20 +181,36 @@ window.biWebSock = (function() {
     }
 
     Room.prototype = {
-        sendBeat: function() {
+        getServer: function (callback) {
+            var self = this;
+            Ajax.get("getUrl.php?roomid=" + self.roomid,
+                (res) => {
+                    if (res == "") {
+                        return;
+                    } else {
+                        var data = JSON.parse(res);
+                        self.roomid = data.realId;
+                        callback(data.wsaddress);
+                    }
+
+                });
+
+
+        },
+        sendBeat: function () {
             var self = this
             self.timer = setInterval(function () {
                 self.socket.send(generatePacket())
             }, 3000)
         },
-        destroy: function() {
+        destroy: function () {
             clearTimeout(this.timer)
             this.socket.close()
             this.socket = null
             this.timer = null
             this.roomid = null
         },
-        joinRoom: function(rid, uid) {
+        joinRoom: function (rid, uid) {
             rid = rid || 282712
             uid = uid || 19176530
             var packet = JSON.stringify({
@@ -150,85 +219,88 @@ window.biWebSock = (function() {
             })
             return generatePacket(7, packet)
         },
-        init: function(roomid) {
-            var self = this
-            self.roomid = roomid
-            var socket = new WebSocket(wsUrl)
-            socket.binaryType = 'arraybuffer'
-            socket.onopen = function(event) {
-                var join = self.joinRoom(roomid)
-                socket.send(join.buffer)
-                self.sendBeat(socket)
-            }
+        init: async function (roomid = 249500) {
+            var self = this;
+            var socket = null;
+            self.roomid = roomid;
+            self.getServer((url) => {
+                socket = new WebSocket(url);
+                socket.binaryType = 'arraybuffer';
+                socket.onopen = function (event) {
+                    var join = self.joinRoom(self.roomid)
+                    socket.send(join.buffer)
+                    self.sendBeat(socket)
+                };
 
-            socket.onmessage = function(event) {
-                var dataView = new DataView(event.data)
-                var data = {}
-                data.packetLen = dataView.getUint32(0)
-                dataStruct.forEach(function(item) {
-                    if (item.bytes === 4) {
-                        data[item.key] = dataView.getUint32(item.offset)
-                    } else if (item.bytes === 2) {
-                        data[item.key] = dataView.getUint16(item.offset)
-                    }
-                })
-                if (data.op && data.op === 5) {
-                    data.body = []
-                    var packetLen = data.packetLen
-                    for (var offset = 0; offset < dataView.byteLength; offset += packetLen) {
-                        packetLen = dataView.getUint32(offset)
-                        headerLen = dataView.getUint16(offset + 4)
+                socket.onmessage = function (event) {
+                    var dataView = new DataView(event.data)
+                    var data = {}
+                    for (var doffset = 0; doffset < dataView.byteLength;) {
 
-                        var recData = []
-                        for (var i = headerLen; i < packetLen; i++) {
-                            recData.push(dataView.getUint8(i))
-                        }
-                        try {
-                            // console.log(bytes2str(recData))
-                            let body = JSON.parse(bytes2str(recData))
-                            if (body.cmd === 'DANMU_MSG') {
-                                console.log(body.info[2][1], ':', body.info[1])
-                                self.fn.call(null, {
-                                    name: body.info[2][1],
-                                    text: body.info[1]
-                                })
+                        data.packetLen = dataView.getUint32(doffset);
+                        dataStruct.forEach(function (item) {
+                            if (item.bytes === 4) {
+                                data[item.key] = dataView.getUint32(item.offset + doffset)
+                            } else if (item.bytes === 2) {
+                                data[item.key] = dataView.getUint16(item.offset + doffset)
                             }
-                            data.body.push(body)
-                        } catch (e) {
-                            // console.log('tcp 校验失败，重新发送')
+                        })
+                        if (data.op && data.op === 5) {
+                            data.body = []
+                            var recData = []
+                            for (var i = data.headerLen; i < data.packetLen; i++) {
+                                recData.push(dataView.getUint8(doffset+i))
+                            }
+                            try {
+                                // console.log(bytes2str(recData))
+                                let body = JSON.parse(bytes2str(recData))
+                                if (body.cmd === 'DANMU_MSG') {
+                                    console.log(body.info[2][1], ':', body.info[1])
+                                    self.fn.call(null, {
+                                        name: body.info[2][1],
+                                        text: body.info[1]
+                                    })
+                                }
+                                data.body.push(body)
+                            } catch (e) {
+                                // console.log('tcp 校验失败，重新发送')
+                            }
+
                         }
+                        doffset+= data.packetLen;
                     }
                 }
-            }
 
-            socket.onclose = function() {
-                if (this.roomid) {
-                    console.log('关闭直播间:' + this.roomid)
+                socket.onclose = function () {
+                    if (this.roomid) {
+                        console.log('关闭直播间:' + this.roomid)
+                    }
                 }
-            }
 
-            self.socket = socket
+                self.socket = socket
+            })
+
         },
 
-        then: function(fn) {
+        then: function (fn) {
             this.fn = fn
         }
     }
 
     return {
         room: null,
-        start: function(roomid) {
+        start: function (roomid) {
             console.log('正在进入房间：' + roomid + '...')
             this.room = new Room()
             this.room.init(roomid)
             return this.room
         },
-        disconnect: function() {
+        disconnect: function () {
             if (this.room) {
                 console.log('正在退出房间：' + this.room.roomid + '...')
                 this.room.destroy()
                 this.room = null
-            }  
+            }
         }
     }
 })()
